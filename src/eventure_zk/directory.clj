@@ -67,12 +67,10 @@
         old
         (do (doseq [uri (reverse added)
                     chan channels]
-              (println "PUT TO CHAN" chan (->SourceUpdate topic uri :joined))
               (when-not (async/put! chan (->SourceUpdate topic uri :joined))
                 (dosync (alter watches update-in [topic :channels] disj chan))))
             (doseq [uri (reverse removed)
                     chan channels]
-              (println "PUT TO CHAN" chan (->SourceUpdate topic uri :left))
               (when-not (async/put! chan (->SourceUpdate topic uri :left))
                 (dosync (alter watches update-in [topic :channels] disj chan))))
             new)))))
@@ -94,7 +92,8 @@
     (case keeper-state
       :SyncConnected (refresh zkdir)
       :Disconnected 'noop
-      :Expired (let [watcher (zi/make-watcher (partial handle-global connect-str timeout-msec zkdir))]
+      :Expired (let [watcher (zi/make-watcher (partial handle-global connect-str
+                                                       timeout-msec zkdir))]
                  (println "Client expired, creating new one.")
                  (zk/close @client)
                  (reset! client (ZooKeeper. connect-str timeout-msec watcher))))))
@@ -106,14 +105,14 @@
   DirectoryWriter
   (add-source [this topic uri]
     (let [base64 (uri->base64 uri)]
-      (when (dosync (when-not (get (set (get @cache topic)) uri)
-                      (alter cache update-in [topic] conj uri)))
-        (try
-          (zk/create-all @client (str (:zk-root config) "/" topic "/" base64)
-                         :data (uri->bytes uri))
-          (catch KeeperException ke
-            (println "Could not register" uri "for topic" topic " (cache did succeed)."
-                     "\nError was:" ke))))))
+      (dosync (when-not (get (set (get @cache topic)) uri)
+                (alter cache update-in [topic] conj uri)))
+      (try
+        (zk/create-all @client (str (:zk-root config) "/" topic "/" base64)
+                       :data (uri->bytes uri))
+        (catch KeeperException ke
+          (println "Could not register" uri "for topic" topic " (cache did succeed)."
+                   "Will be retried on reconnect. \nError was:" ke)))))
 
   (remove-source [this topic uri]
     (dosync (alter cache update-in [topic] (fn [uris] (remove (partial = uri) uris))))
@@ -121,6 +120,7 @@
       (try
         (zk/delete @client (str (:zk-root config) "/" topic "/" base64))
         (catch KeeperException ke
+          ;;---TODO Also keep a cache of what should be removed on reconnect/refresh?
           (println "Could not unregister" uri "for topic" topic " (cache did succeed)."
                    "\nError was:" ke)))))
 
@@ -142,13 +142,17 @@
                                         (.printStackTrace ex)))]
                         (alter watches assoc-in [topic :agent] ag)
                         ag)))]
-      (let [current (sources this topic :sort-ctime? true
-                             :watcher #(send-off ag handle-watch this topic %))]
-        (send-off ag (constantly current))))
+      (try
+        (let [current (sources this topic :sort-ctime? true
+                               :watcher #(send-off ag handle-watch this topic %))]
+          (send-off ag (constantly current)))
+        (catch KeeperException ke
+          (println "Could not get initial sources for topic" topic "."
+                   "Will be retried on reconnect.\nError was:" ke))))
 
     ;; Add channel to topic watchers, if not already in there.
     (when (dosync
-            (when-not (= (get @watches topic) chan)
+            (when-not (contains? (set (get-in @watches [topic :channels])) chan)
               (alter watches update-in [topic :channels] conj-set chan)))
       (when-let [sources (seq @(get-in @watches [topic :agent]))]
         (case init
