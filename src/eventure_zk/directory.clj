@@ -78,7 +78,7 @@
 
 (defn- refresh
   [{:keys [watches cache] :as zkdir}]
-  (println "New client was created or client recovered from disconnect; refreshing data.")
+  (println "Refreshing data.")
   (doseq [[topic uris] @cache
           uri (reverse uris)]
     (api/add-source zkdir topic uri))
@@ -90,8 +90,9 @@
   [connect-str timeout-msec {:keys [client] :as zkdir} {:keys [event-type keeper-state] :as event}]
   (if (= :None event-type)
     (case keeper-state
-      :SyncConnected (refresh zkdir)
-      :Disconnected 'noop
+      :SyncConnected (do (println "Client connected.")
+                         (refresh zkdir))
+      :Disconnected (println "Client disconnected.")
       :Expired (let [watcher (zi/make-watcher (partial handle-global connect-str
                                                        timeout-msec zkdir))]
                  (println "Client expired, creating new one.")
