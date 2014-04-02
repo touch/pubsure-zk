@@ -1,6 +1,7 @@
-(ns eventure-zk.directory
+(ns pubsure-zk.directory
   "Directory service implementation using ZooKeeper."
-  (:require [eventure.core :as api :refer (DirectoryReader DirectoryWriter ->SourceUpdate)]
+  (:require [pubsure.core :as api :refer (DirectoryReader DirectoryWriter ->SourceUpdate)]
+            [pubsure.utils :refer (conj-set)]
             [clojure.core.async :as async]
             [zookeeper :as zk]
             [zookeeper.internal :as zi])
@@ -12,12 +13,6 @@
 
 
 ;;; Helper methods.
-
-(defn- conj-set
-  "Ensures a conj results in a set."
-  [coll val]
-  (set (conj coll val)))
-
 
 (defn- uri->bytes
   [^URI uri]
@@ -76,6 +71,7 @@
             new)))))
 
 
+;;---TODO Have a periodic refresh?
 (defn- refresh
   [{:keys [watches cache] :as zkdir}]
   (println "Refreshing data.")
@@ -165,13 +161,13 @@
 
   (unwatch-sources [this topic chan]
     (dosync
-      (alter watches update-in [topic] disj chan))
+      (alter watches update-in [topic :channels] disj chan))
     chan))
 
 
 (defn start-directory
   [connect-str & {:keys [subscribe-buffer zk-root timeout-msec]
-                  :or {zk-root "/eventure"
+                  :or {zk-root "/pubsure"
                        timeout-msec 30000}
                   :as config}]
   (let [client (atom nil)
@@ -183,7 +179,8 @@
 
 (defn stop-directory
   [{:keys [client] :as zkdir}]
-  (zk/close @client))
+  (zk/close @client)
+  (println "Client stopped."))
 
 
 

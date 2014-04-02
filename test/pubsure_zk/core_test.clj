@@ -1,6 +1,6 @@
-(ns eventure-zk.core-test
+(ns pubsure-zk.core-test
   (:require [clojure.test :refer :all]
-            [eventure-zk.core :refer :all]))
+            [pubsure-zk.core :refer :all]))
 
 (deftest a-test
   (testing "FIXME, I fail."
