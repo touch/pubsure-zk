@@ -155,7 +155,8 @@
         (case init
           :last (async/put! chan (->SourceUpdate topic (first sources) :joined))
           :all (doseq [uri sources] (async/put! chan (->SourceUpdate topic uri :joined)))
-          :random (async/put! chan (->SourceUpdate topic (rand-nth sources) :joined)))))
+          :random (async/put! chan (->SourceUpdate topic (rand-nth sources) :joined))
+          :none 'noop)))
 
     chan)
 
