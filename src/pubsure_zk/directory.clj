@@ -4,13 +4,14 @@
             [pubsure.utils :refer (conj-set)]
             [clojure.core.async :as async]
             [zookeeper :as zk]
-            [zookeeper.internal :as zi])
+            [zookeeper.internal :as zi]
+            [taoensso.timbre :as timbre])
   (:import [java.net URI]
            [java.security MessageDigest]
            [org.apache.commons.codec.binary Base64]
            [java.util.concurrent CountDownLatch TimeUnit]
            [org.apache.zookeeper ZooKeeper KeeperException]))
-
+(timbre/refer-timbre)
 
 ;;; Helper methods.
 
@@ -37,6 +38,7 @@
 (defn- sources
   [{:keys [client config] :as zkdir} topic & {:keys [sort-ctime? watcher]}]
   (let [base-path (str (:zk-root config) "/" topic)]
+    (trace "Getting sources for topic" topic "at path" base-path)
     (when-let [children (zk/children @client base-path :watcher watcher)]
       (let [nodes (map (comp (partial zk/data @client) (partial str base-path "/")) children)
             sorted (if sort-ctime? (sort-by (comp - :ctime :stat) nodes) nodes)]
@@ -45,36 +47,41 @@
 
 (defn- handle-watch
   [old {:keys [watches] :as zkdir} topic {:keys [event-type path] :as event}]
-  (println "Handling watch" event)
+  (debug "Handling data watch on topic" topic "-" event)
   (if-not (= event-type :NodeChildrenChanged)
     old
     (let [ag (get-in @watches [topic :agent])
-          channels (get-in @watches [topic :channels])
           new (try
                 (sources zkdir topic :sort-ctime? true
                          :watcher #(send-off ag handle-watch zkdir topic %))
                 (catch KeeperException ke
-                  (println "Could not get the sources when handling the watch on topic" topic
-                           "\nError was:" ke)))
-          added (remove (set old) new)
-          removed (remove (set new) old)]
-      (if-not new
+                  (error "Could not get the sources when handling the watch on topic "
+                         (str topic ".") "Keeping the old cache.\nError was:" ke)
+                  :error))]
+      (if (= :error new)
         old
-        (do (doseq [uri (reverse added)
-                    chan channels]
-              (when-not (async/put! chan (->SourceUpdate topic uri :joined))
-                (dosync (alter watches update-in [topic :channels] disj chan))))
-            (doseq [uri (reverse removed)
-                    chan channels]
-              (when-not (async/put! chan (->SourceUpdate topic uri :left))
-                (dosync (alter watches update-in [topic :channels] disj chan))))
-            new)))))
+        (let [added (remove (set old) new)
+              removed (remove (set new) old)]
+          (debug "Added sources for topic" topic "are" added)
+          (doseq [uri (reverse added)
+                  chan (get-in @watches [topic :channels])]
+            (trace "Sending joined source update for" uri "regarding topic" topic "to" chan)
+            (when (false? (async/put! chan (->SourceUpdate topic uri :joined)))
+              (dosync (alter watches update-in [topic :channels] disj chan))
+              (debug "Watch channel" chan "was closed, thus removed.")))
+          (debug "Removed sources for topic" topic "are" removed)
+          (doseq [uri (reverse removed)
+                  chan (get-in @watches [topic :channels])]
+            (when (false? (async/put! chan (->SourceUpdate topic uri :left)))
+              (dosync (alter watches update-in [topic :channels] disj chan))
+              (debug "Watch channel" chan "was closed, thus removed.")))
+          new)))))
 
 
 ;;---TODO Have a periodic refresh?
 (defn- refresh
   [{:keys [watches cache] :as zkdir}]
-  (println "Refreshing data.")
+  (debug "Refreshing data using cached data.")
   (doseq [[topic uris] @cache
           uri (reverse uris)]
     (api/add-source zkdir topic uri))
@@ -84,14 +91,15 @@
 
 (defn- handle-global
   [connect-str timeout-msec {:keys [client] :as zkdir} {:keys [event-type keeper-state] :as event}]
-  (if (= :None event-type)
+  (when (= :None event-type)
+    (debug "Handling global event" event)
     (case keeper-state
-      :SyncConnected (do (println "Client connected.")
+      :SyncConnected (do (info "Client connected, initiating refresh of cached data.")
                          (refresh zkdir))
-      :Disconnected (println "Client disconnected.")
+      :Disconnected (info "Client disconnected, waiting for it to reconnect.")
       :Expired (let [watcher (zi/make-watcher (partial handle-global connect-str
                                                        timeout-msec zkdir))]
-                 (println "Client expired, creating new one.")
+                 (info "Client expired, creating new one.")
                  (zk/close @client)
                  (reset! client (ZooKeeper. connect-str timeout-msec watcher))))))
 
@@ -101,6 +109,7 @@
 (defrecord ZooKeeperDirectory [client config cache watches]
   DirectoryWriter
   (add-source [this topic uri]
+    (debug "Adding source" uri "for topic" topic)
     (let [base64 (uri->base64 uri)]
       (dosync (when-not (get (set (get @cache topic)) uri)
                 (alter cache update-in [topic] conj uri)))
@@ -108,21 +117,23 @@
         (zk/create-all @client (str (:zk-root config) "/" topic "/" base64)
                        :data (uri->bytes uri))
         (catch KeeperException ke
-          (println "Could not register" uri "for topic" topic " (cache did succeed)."
-                   "Will be retried on reconnect. \nError was:" ke)))))
+          (error "Could not register" uri "for topic" topic " (cache did succeed)."
+                 "Will be retried on reconnect. \nError was:" ke)))))
 
   (remove-source [this topic uri]
+    (debug "Removing source" uri "for topic" topic)
     (dosync (alter cache update-in [topic] (fn [uris] (remove (partial = uri) uris))))
     (let [base64 (uri->base64 uri)]
       (try
         (zk/delete @client (str (:zk-root config) "/" topic "/" base64))
         (catch KeeperException ke
           ;;---TODO Also keep a cache of what should be removed on reconnect/refresh?
-          (println "Could not unregister" uri "for topic" topic " (cache did succeed)."
-                   "\nError was:" ke)))))
+          (error "Could not unregister" uri "for topic" topic " (cache did succeed)."
+                 "\nError was:" ke)))))
 
   DirectoryReader
   (sources [this topic]
+    (debug "Sources requested for topic" topic)
     (sources this topic :sort-ctime? false))
 
   (watch-sources [this topic init]
@@ -131,27 +142,29 @@
 
   (watch-sources [this topic init chan]
     ;; Create agent when not yet existing for this topic.
+    (debug "Watch requested for" topic "on" chan "using modifier" init)
     (when-let [ag (dosync
                     (when-not (get-in @watches [topic :agent])
-                      (let [ag (agent nil :error-handler
-                                      (fn [ag ex]
-                                        (println "Agent error for ag:" ag)
-                                        (.printStackTrace ex)))]
+                      (let [ag (agent nil :error-handler #(error "Agent error on" %1 "-" %2))]
                         (alter watches assoc-in [topic :agent] ag)
                         ag)))]
+      (debug "Created agent for topic" (str topic ",")
+             "getting current sources from Zookeeper and setting watch.")
       (try
         (let [current (sources this topic :sort-ctime? true
                                :watcher #(send-off ag handle-watch this topic %))]
           (send-off ag (constantly current)))
         (catch KeeperException ke
-          (println "Could not get initial sources for topic" topic "."
-                   "Will be retried on reconnect.\nError was:" ke))))
+          (error "Could not get initial sources for topic" topic "."
+                 "Will be retried on reconnect.\nError was:" ke))))
 
     ;; Add channel to topic watchers, if not already in there.
     (when (dosync
             (when-not (contains? (set (get-in @watches [topic :channels])) chan)
               (alter watches update-in [topic :channels] conj-set chan)))
+      (debug "Added channel" chan "to watches of topic" topic)
       (when-let [sources (seq @(get-in @watches [topic :agent]))]
+        (debug "Handling initial modifier" init "for channel" chan "on topic" topic)
         (case init
           :last (async/put! chan (->SourceUpdate topic (first sources) :joined))
           :all (doseq [uri sources] (async/put! chan (->SourceUpdate topic uri :joined)))
@@ -161,6 +174,7 @@
     chan)
 
   (unwatch-sources [this topic chan]
+    (debug "Unwatch requested for topic" topic "on channel" chan)
     (dosync
       (alter watches update-in [topic :channels] disj chan))
     chan))
@@ -171,17 +185,21 @@
                   :or {zk-root "/pubsure"
                        timeout-msec 30000}
                   :as config}]
+  (info "Starting Zookeeper directory service client, using connection string" connect-str
+        "and config" config "...")
   (let [client (atom nil)
         zkdir (ZooKeeperDirectory. client (assoc config :zk-root zk-root) (ref {}) (ref {}))
         watcher (zi/make-watcher (partial handle-global connect-str timeout-msec zkdir))]
     (reset! client (ZooKeeper. connect-str timeout-msec watcher))
+    (info "Started Zookeeper directory service client.")
     zkdir))
 
 
 (defn stop-directory
   [{:keys [client] :as zkdir}]
+  (info "Stopping Zookeeper directory service client...")
   (zk/close @client)
-  (println "Client stopped."))
+  (info "Stopped Zookeeper directory service client."))
 
 
 
