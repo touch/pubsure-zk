@@ -138,7 +138,7 @@
 
   (watch-sources [this topic init]
     (api/watch-sources this topic init
-                       (async/chan (async/sliding-buffer (get config :subscribe-buffer 10)))))
+                       (async/chan (async/sliding-buffer (get config :subscribe-buffer 100)))))
 
   (watch-sources [this topic init chan]
     ;; Create agent when not yet existing for this topic.
@@ -183,7 +183,7 @@
 (defn start-directory
   [connect-str & {:keys [subscribe-buffer zk-root timeout-msec]
                   :or {zk-root "/pubsure"
-                       timeout-msec 30000}
+                       timeout-msec 10000}
                   :as config}]
   (info "Starting Zookeeper directory service client, using connection string" connect-str
         "and config" config "...")
