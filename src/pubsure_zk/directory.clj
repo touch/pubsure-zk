@@ -3,6 +3,7 @@
   (:require [pubsure.core :as api :refer (DirectoryReader DirectoryWriter ->SourceUpdate)]
             [pubsure.utils :refer (conj-set)]
             [clojure.core.async :as async]
+            [clojure.string :refer (trim)]
             [zookeeper :as zk]
             [zookeeper.internal :as zi]
             [taoensso.timbre :as timbre])
@@ -181,12 +182,32 @@
 
 
 (defn start-directory
+  "Starts a Zookeeper backed DirectoryReader and DirectoryWriter. The
+  following options can be specified:
+
+   :timeout-msec - The number of milliseconds until the internal
+   Zookeeper client is expired and the registered URIs through this
+   `DirectoryWriter` are removed automatically. Default is 10000 (10
+   seconds).
+
+   :zk-root - The root path of where to store the topics and the
+   source URIs. Default is `/pubsure`.
+
+   :subscribe-buffer - The size of the sliding core.async buffer used
+   in the `DirectoryReader/watch-sources` function, in case no
+   core.async channel is supplied. Default is 100.
+
+  The return value must be used for the `stop-directory` function."
   [connect-str & {:keys [subscribe-buffer zk-root timeout-msec]
                   :or {zk-root "/pubsure"
                        timeout-msec 10000}
                   :as config}]
   (info "Starting Zookeeper directory service client, using connection string" connect-str
         "and config" config "...")
+  (assert (and connect-str (seq (trim connect-str)))
+          "Zookeeper connection string cannot be nil or empty.")
+  (assert (= \/ (first zk-root))
+          "Zookeeper root must start with a '/'.")
   (let [client (atom nil)
         zkdir (ZooKeeperDirectory. client (assoc config :zk-root zk-root) (ref {}) (ref {}))
         watcher (zi/make-watcher (partial handle-global connect-str timeout-msec zkdir))]
@@ -196,6 +217,8 @@
 
 
 (defn stop-directory
+  "Given the return value of the `start-directory` function, this
+  stops the Zookeeper client"
   [{:keys [client] :as zkdir}]
   (info "Stopping Zookeeper directory service client...")
   (zk/close @client)
