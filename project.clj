@@ -1,12 +1,12 @@
-(defproject pubsure/pubsure-zk "0.1.0-SNAPSHOT"
+(defproject pubsure/pubsure-zk "0.2.0-SNAPSHOT"
   :description "Zookeeper implementation for pubsure."
   :url "https://github.com/touch/pubsure-zk"
   :license {:name "Eclipse Public License"
             :url "http://www.eclipse.org/legal/epl-v10.html"}
-  :dependencies [[org.clojure/clojure "1.5.1"]
-                 [pubsure/pubsure-core "0.1.0-SNAPSHOT"]
+  :dependencies [[org.clojure/clojure "1.9.0"]
+                 [pubsure/pubsure-core "0.2.0-SNAPSHOT"]
                  [zookeeper-clj "0.9.3"]
-                 [com.taoensso/timbre "3.1.6"]]
+                 [com.taoensso/timbre "6.2.2"]]
   :pom-plugins [[com.theoryinpractise/clojure-maven-plugin "1.3.15"
                  {:extensions "true"
                   :executions ([:execution
