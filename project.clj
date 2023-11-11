@@ -3,7 +3,7 @@
   :url "https://github.com/touch/pubsure-zk"
   :license {:name "Eclipse Public License"
             :url "http://www.eclipse.org/legal/epl-v10.html"}
-  :dependencies [[org.clojure/clojure "1.10.3"]
+  :dependencies [[org.clojure/clojure "1.9.0"]
                  [pubsure/pubsure-core "0.2.0-SNAPSHOT"]
                  [zookeeper-clj "0.9.3"]
                  [com.taoensso/timbre "6.2.2"]]
